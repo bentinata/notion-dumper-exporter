@@ -710,11 +710,29 @@ class NotionExporter:
     def _render_children(self, block: Block) -> str:
         if not block.content:
             return ""
+        return self._render_block_ids(block.content)
+
+    def _render_block_ids(self, ids: list) -> str:
+        """Render a sequence of block ids, merging consecutive numbered_list
+        blocks into a single <ol> so numbering doesn't restart at 1."""
         parts = []
-        for child_id in block.content:
+        ol_run = []
+        def flush_ol():
+            if ol_run:
+                parts.append("<ol>" + "".join(f"<li>{i}</li>" for i in ol_run) + "</ol>")
+                ol_run.clear()
+        for child_id in ids:
             child = self.all_blocks.get(child_id)
-            if child and child.type != "page":
-                parts.append(self._render_block(child))
+            if not child or child.type == "page":
+                continue
+            if child.type == "numbered_list":
+                text = self._get_rich_html(child.properties.get("title", []))
+                inner = self._render_block_ids(child.content or [])
+                ol_run.append(text + inner)
+                continue
+            flush_ol()
+            parts.append(self._render_block(child))
+        flush_ol()
         return "\n".join(parts)
 
     def _render_table(self, block: Block) -> str:
@@ -755,15 +773,11 @@ class NotionExporter:
         parts = [f'<h{heading_level} id="{anchor}">{icon_html}{title}</h{heading_level}>']
 
         if block.content:
-            for child_id in block.content:
-                child = self.all_blocks.get(child_id)
-                if not child:
-                    continue
-                if child.type == "page":
-                    continue
-                rendered = self._render_block(child)
-                if rendered:
-                    parts.append(rendered)
+            rendered_ids = [cid for cid in block.content
+                            if self.all_blocks.get(cid) and self.all_blocks[cid].type != "page"]
+            body = self._render_block_ids(rendered_ids)
+            if body:
+                parts.append(body)
 
         return "\n".join(parts)
 
