@@ -335,6 +335,7 @@ class NotionExporter:
                 content=v.get("content", []),
                 space_id=v.get("space_id", ""),
                 parent_id=v.get("parent_id", ""),
+                collection_id=v.get("collection_id", ""),
             )
         return blocks
 
@@ -381,9 +382,9 @@ class NotionExporter:
             return {}
 
     def _expand_lazy_content(self, page_blocks: dict[str, Block]):
-        """Backfill toggle children for a page's blocks (toggles list child ids in
-        the page record but the child blocks are only served on demand)."""
+        """Backfill toggle children and collection view rows for a page's blocks."""
         space_id = next((b.space_id for b in page_blocks.values() if b.space_id), "")
+        # --- toggles (recursive) ---
         queue = [b for b in page_blocks.values() if b.type == "toggle"]
         processed = set()
         while queue:
@@ -407,9 +408,24 @@ class NotionExporter:
             if new_blocks:
                 tb.content = [cid for cid in new_blocks if new_blocks[cid].parent_id == tb.id] or list(new_blocks.keys())
             for cid in tb.content:
-                c = new_blocks.get(cid) if new_blocks else self.all_blocks.get(cid)
+                c = new_blocks.get(cid)
                 if c and c.type == "toggle":
                     queue.append(c)
+        # --- any block whose referenced children are missing (e.g. callouts) ---
+        for _ in range(3):
+            pending = []
+            for b in list(page_blocks.values()):
+                missing_kids = [cid for cid in b.content if cid not in self.all_blocks]
+                if missing_kids:
+                    pending.append(b)
+            if not pending:
+                break
+            for b in pending:
+                new_blocks = self._fetch_toggle_children(b.id, b.space_id or space_id)
+                time.sleep(0.1)
+                for bid, nb in new_blocks.items():
+                    self.all_blocks.setdefault(bid, nb)
+                    page_blocks.setdefault(bid, nb)
         # --- collection views ---
         for b in list(page_blocks.values()):
             if b.type not in ("collection_view", "collection_view_page"):
@@ -631,7 +647,14 @@ class NotionExporter:
         elif t == "callout":
             text = self._get_rich_html(props.get("title", []))
             icon = fmt.get("page_icon", "")
-            return f'<div class="callout"><span class="callout-icon">{icon}</span><div>{text}</div></div>'
+            plain_title = re.sub(r"<[^>]+>", "", text)
+            children_html = self._render_children(block)
+            plain_children = re.sub(r"<[^>]+>", "", children_html).strip()
+            # avoid duplicating text that already lives in the callout title
+            if plain_children and plain_children in plain_title:
+                children_html = ""
+            body = text + children_html
+            return f'<div class="callout"><span class="callout-icon">{icon}</span><div>{body}</div></div>'
 
         elif t == "quote":
             text = self._get_rich_html(props.get("title", []))
