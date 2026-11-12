@@ -317,6 +317,74 @@ class NotionExporter:
 
         return blocks
 
+    def _parse_record_blocks(self, record_map: dict) -> dict[str, Block]:
+        blocks = {}
+        for bid, bdata in record_map.get("block", {}).items():
+            v = bdata.get("value", {}).get("value", bdata.get("value", {}))
+            if not v:
+                continue
+            blocks[bid] = Block(
+                id=bid,
+                type=v.get("type", "unknown"),
+                properties=v.get("properties", {}),
+                format=v.get("format", {}),
+                content=v.get("content", []),
+                space_id=v.get("space_id", ""),
+                parent_id=v.get("parent_id", ""),
+            )
+        return blocks
+
+    def _fetch_toggle_children(self, block_id: str, space_id: str) -> dict[str, Block]:
+        """Fetch a toggle block's children via loadCachedPageChunks (they are not
+        included in the page's block tree)."""
+        payload = {
+            "requests": [
+                {
+                    "page": {"id": block_id, "spaceId": space_id},
+                    "cursor": {"stack": []},
+                    "verticalColumns": False,
+                }
+            ]
+        }
+        try:
+            resp = self.session.post(self._api_url("loadCachedPageChunks"), json=payload, timeout=30)
+            resp.raise_for_status()
+            return self._parse_record_blocks(resp.json().get("recordMap", {}))
+        except requests.RequestException as e:
+            print(f"  [!] Failed to fetch toggle children {block_id}: {e}", file=sys.stderr)
+            return {}
+
+    def _expand_lazy_content(self, page_blocks: dict[str, Block]):
+        """Backfill toggle children for a page's blocks (toggles list child ids in
+        the page record but the child blocks are only served on demand)."""
+        space_id = next((b.space_id for b in page_blocks.values() if b.space_id), "")
+        queue = [b for b in page_blocks.values() if b.type == "toggle"]
+        processed = set()
+        while queue:
+            tb = queue.pop(0)
+            if tb.id in processed:
+                continue
+            processed.add(tb.id)
+            if tb.content and all(self.all_blocks.get(cid) for cid in tb.content):
+                # children already fetched; queue nested toggles
+                for cid in tb.content:
+                    c = self.all_blocks.get(cid) or page_blocks.get(cid)
+                    if c and c.type == "toggle":
+                        queue.append(c)
+                continue
+            new_blocks = self._fetch_toggle_children(tb.id, tb.space_id or space_id)
+            time.sleep(0.1)
+            for bid, nb in new_blocks.items():
+                if bid not in self.all_blocks:
+                    self.all_blocks[bid] = nb
+                    page_blocks.setdefault(bid, nb)
+            if new_blocks:
+                tb.content = [cid for cid in new_blocks if new_blocks[cid].parent_id == tb.id] or list(new_blocks.keys())
+            for cid in tb.content:
+                c = new_blocks.get(cid) if new_blocks else self.all_blocks.get(cid)
+                if c and c.type == "toggle":
+                    queue.append(c)
+
     def crawl(self, page_id: str = None, depth: int = 0):
         if page_id is None:
             page_id = self.root_page_id
@@ -327,6 +395,7 @@ class NotionExporter:
 
         blocks = self.fetch_page_blocks(page_id)
         self.all_blocks.update(blocks)
+        self._expand_lazy_content(blocks)
 
         page_block = blocks.get(page_id)
         if page_block:
