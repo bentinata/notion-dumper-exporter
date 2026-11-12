@@ -370,7 +370,7 @@ class NotionExporter:
                 "sort": [],
                 "searchQuery": "",
                 "archiveStatus": "NON_ARCHIVED",
-                "userTimeZone": "Asia/Jakarta",
+                "userTimeZone": "UTC",
             },
         }
         try:
